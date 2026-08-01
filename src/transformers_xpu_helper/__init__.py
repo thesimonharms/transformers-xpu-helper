@@ -25,6 +25,7 @@ from .memory import (
     estimate_budget,
     format_bytes,
     suggest_batch_size,
+    suggest_vision_batch_size,
 )
 from .optimize import (
     PreparedModel,
@@ -36,7 +37,7 @@ from .optimize import (
 )
 from .profiling import Profiler, StepStats
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AmpBundle",
@@ -66,6 +67,7 @@ __all__ = [
     "resolve_amp",
     "resolve_profile",
     "suggest_batch_size",
+    "suggest_vision_batch_size",
     "training_step",
     "ultra_255h_config",
     "wrap_dataloader",
@@ -76,7 +78,9 @@ __all__ = [
 def __getattr__(name: str):
     # Lazy optional exports that need the transformers extra.
     if name in {
+        "build_seq2seq_training_arguments",
         "build_training_arguments",
+        "is_vision_encoder_decoder",
         "optimize_model_for_trainer",
         "recommend_for_model",
     }:

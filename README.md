@@ -4,6 +4,8 @@ Speed up and optimize [Hugging Face Transformers](https://huggingface.co/docs/tr
 
 Uses **native PyTorch XPU** (2.5+). [Intel Extension for PyTorch (IPEX) is EOL](https://pytorch-extension.intel.com/) — prefer stock PyTorch with the `xpu` wheel index.
 
+Use this library for **any** HF `Trainer` / `Seq2SeqTrainer` cook on 255H / Arc 140T (classifiers, TrOCR, other encoder-decoders). Discover knobs once here; override micro-batch after a 1–2 step smoke on the target box.
+
 ## Why this exists
 
 Client Arc GPUs share system memory, lack a comfortable GradScaler/FP64 path, and sit next to a hybrid P/E-core CPU. Stock Transformers/`Trainer` knobs assume discrete CUDA cards. This library applies 255H-oriented defaults:
@@ -26,6 +28,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 # This helper (+ optional HF integration)
 pip install transformers-xpu-helper
 pip install 'transformers-xpu-helper[transformers]'  # Trainer helpers
+
+# Or from GitHub (latest main):
+pip install 'transformers-xpu-helper[transformers] @ git+https://github.com/thesimonharms/transformers-xpu-helper.git'
 ```
 
 Intel GPU drivers are still required — see [PyTorch Getting Started on Intel GPU](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.md).
@@ -71,6 +76,38 @@ trainer = Trainer(model=model, args=args, train_dataset=train_ds, eval_dataset=e
 trainer.train()
 ```
 
+## Quick start (Seq2Seq / TrOCR)
+
+```python
+from transformers import Seq2SeqTrainer, VisionEncoderDecoderModel
+from transformers_xpu_helper import ultra_255h_config
+from transformers_xpu_helper.trainer import (
+    build_seq2seq_training_arguments,
+    recommend_for_model,
+)
+
+model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-printed")
+cfg = recommend_for_model(
+    model,
+    task="vision",
+    image_hw=(384, 384),
+    config=ultra_255h_config(torch_compile=False),
+)
+# Smoke 1–2 steps at cfg.per_device_train_batch_size (± neighbors, GC on/off)
+# then override if the XPU disagrees with the heuristic.
+args = build_seq2seq_training_arguments(
+    "./out",
+    config=cfg,
+    num_train_epochs=3,
+    learning_rate=3e-5,
+    predict_with_generate=False,
+)
+trainer = Seq2SeqTrainer(model=model, args=args, train_dataset=train_ds)
+trainer.train()
+```
+
+See [`examples/trocr_finetune_sketch.py`](examples/trocr_finetune_sketch.py) for a runnable wiring sketch.
+
 ## Inspect the machine
 
 ```bash
@@ -90,6 +127,8 @@ The built-in profile encodes:
 
 Nearby Arrow Lake-H SKUs (265H / 285H) reuse the same knobs.
 
+Low host RSS during a cook does **not** mean free XPU headroom — Arc shares DRAM; raise micro-batch or disable gradient checkpointing only after a smoke that stays stable (no OOM / `DEVICE_LOST`).
+
 ## API surface
 
 | Module | Role |
@@ -98,16 +137,16 @@ Nearby Arrow Lake-H SKUs (265H / 285H) reuse the same knobs.
 | `config` | `ultra_255h_config()` / `XPUTrainingConfig` |
 | `optimize` | `prepare_for_training`, `training_step`, `finalize_step` |
 | `amp` | Safe BF16/FP16 autocast + scaler policy |
-| `memory` | Shared-memory budgets + batch-size heuristic |
+| `memory` | Shared-memory budgets + NLP / vision batch heuristics |
 | `dataloader` | XPU-friendly `DataLoader` kwargs |
-| `trainer` | `TrainingArguments` factory for Transformers |
+| `trainer` | `TrainingArguments` / `Seq2SeqTrainingArguments` factories |
 | `profiling` | Step throughput / peak memory helper |
 | `env` | OMP / tokenizer / allocator environment |
 
 ## Development
 
 ```bash
-pip install -e '.[dev]'
+pip install -e '.[dev,transformers]'
 pytest
 ```
 

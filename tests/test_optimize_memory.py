@@ -7,7 +7,12 @@ from transformers_xpu_helper.amp import resolve_amp
 from transformers_xpu_helper.config import ultra_255h_config
 from transformers_xpu_helper.dataloader import dataloader_kwargs
 from transformers_xpu_helper.hardware import CORE_ULTRA_7_255H, DeviceInfo, DeviceKind
-from transformers_xpu_helper.memory import estimate_budget, format_bytes, suggest_batch_size
+from transformers_xpu_helper.memory import (
+    estimate_budget,
+    format_bytes,
+    suggest_batch_size,
+    suggest_vision_batch_size,
+)
 from transformers_xpu_helper.optimize import finalize_step, prepare_for_training, training_step
 from transformers_xpu_helper.profiling import Profiler
 
@@ -55,6 +60,57 @@ def test_memory_budget_and_batch_heuristic():
     # ~110M params (bert-base-ish) should yield a small micro-batch on shared RAM.
     batch = suggest_batch_size(110_000_000, seq_length=512, config=cfg, device_info=info)
     assert 1 <= batch <= 8
+
+
+def test_vision_batch_gc_allows_larger_than_no_gc():
+    info = _fake_xpu_info()
+    # Large-ish vision model (~300M) — GC should recommend >= no-GC.
+    params = 300_000_000
+    with_gc = suggest_vision_batch_size(
+        params,
+        image_hw=(384, 384),
+        config=ultra_255h_config(gradient_checkpointing=True),
+        device_info=info,
+    )
+    no_gc = suggest_vision_batch_size(
+        params,
+        image_hw=(384, 384),
+        config=ultra_255h_config(gradient_checkpointing=False),
+        device_info=info,
+    )
+    assert with_gc >= no_gc
+    assert 1 <= no_gc <= with_gc <= 32
+
+
+def test_vision_batch_scales_with_image_area():
+    info = _fake_xpu_info()
+    cfg = ultra_255h_config(gradient_checkpointing=True)
+    params = 200_000_000
+    small = suggest_vision_batch_size(
+        params, image_hw=(224, 224), config=cfg, device_info=info
+    )
+    large = suggest_vision_batch_size(
+        params, image_hw=(512, 512), config=cfg, device_info=info
+    )
+    assert small >= large
+
+
+def test_nlp_batch_gc_allows_larger_than_no_gc():
+    info = _fake_xpu_info()
+    params = 110_000_000
+    with_gc = suggest_batch_size(
+        params,
+        seq_length=512,
+        config=ultra_255h_config(gradient_checkpointing=True),
+        device_info=info,
+    )
+    no_gc = suggest_batch_size(
+        params,
+        seq_length=512,
+        config=ultra_255h_config(gradient_checkpointing=False),
+        device_info=info,
+    )
+    assert with_gc >= no_gc
 
 
 def test_dataloader_kwargs_shared_memory():

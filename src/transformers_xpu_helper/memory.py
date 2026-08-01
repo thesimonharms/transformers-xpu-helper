@@ -6,11 +6,14 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 from .config import XPUTrainingConfig
 from .hardware import DeviceInfo, detect_device
 
 logger = logging.getLogger(__name__)
+
+TaskKind = Literal["nlp", "vision"]
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,20 @@ def estimate_budget(
     )
 
 
+def _gc_activation_scale(config: XPUTrainingConfig) -> float:
+    """Gradient checkpointing trades compute for activation memory."""
+    return 0.45 if config.gradient_checkpointing else 1.0
+
+
+def _pick_batch(raw: int, min_batch: int, max_batch: int) -> int:
+    candidates = [b for b in (1, 2, 4, 8, 16, 32) if min_batch <= b <= max_batch]
+    chosen = min_batch
+    for b in candidates:
+        if b <= max(1, raw):
+            chosen = b
+    return chosen
+
+
 def suggest_batch_size(
     approx_param_count: int,
     *,
@@ -83,11 +100,12 @@ def suggest_batch_size(
     min_batch: int = 1,
     max_batch: int = 32,
 ) -> int:
-    """Heuristic micro-batch size for AdamW-style fine-tuning on Arc 140T.
+    """Heuristic micro-batch size for AdamW-style NLP fine-tuning on Arc 140T.
 
     Assumptions (BF16 weights + FP32 master weights + Adam moments roughly):
     ~12-16 bytes/param for optimizer state + weights, plus activation overhead
-    scaled by sequence length. This is intentionally conservative for shared DRAM.
+    scaled by sequence length. Gradient checkpointing reduces the activation
+    term. Intentionally conservative for shared DRAM — always re-smoke.
     """
     config = config or XPUTrainingConfig()
     budget = estimate_budget(config, device_info)
@@ -97,21 +115,59 @@ def suggest_batch_size(
         bytes_per_param = 14.0
 
     static = approx_param_count * bytes_per_param
-    # Rough activation working set per sample.
-    per_sample = approx_param_count * activation_factor * (seq_length / 512.0)
+    per_sample = (
+        approx_param_count
+        * activation_factor
+        * (seq_length / 512.0)
+        * _gc_activation_scale(config)
+    )
 
     remaining = max(0.0, budget.trainable_bytes - static)
     if per_sample <= 0:
         return min_batch
 
-    raw = int(remaining // per_sample)
-    # Prefer powers-of-two-ish sizes that accumulate cleanly.
-    candidates = [b for b in (1, 2, 4, 8, 16, 32) if min_batch <= b <= max_batch]
-    chosen = min_batch
-    for b in candidates:
-        if b <= max(1, raw):
-            chosen = b
-    return chosen
+    return _pick_batch(int(remaining // per_sample), min_batch, max_batch)
+
+
+def suggest_vision_batch_size(
+    approx_param_count: int,
+    *,
+    image_hw: tuple[int, int] = (384, 384),
+    config: XPUTrainingConfig | None = None,
+    device_info: DeviceInfo | None = None,
+    bytes_per_param: float | None = None,
+    activation_factor: float = 12.0,
+    min_batch: int = 1,
+    max_batch: int = 32,
+) -> int:
+    """Heuristic micro-batch for vision / OCR encoder-decoder models (e.g. TrOCR).
+
+    Scales activation cost by image area relative to TrOCR's 384×384 default.
+    With gradient checkpointing on, larger micro-batches are recommended than
+    without. Always override after a short smoke on the target XPU.
+    """
+    config = config or XPUTrainingConfig()
+    budget = estimate_budget(config, device_info)
+
+    if bytes_per_param is None:
+        bytes_per_param = 14.0
+
+    h, w = image_hw
+    area_scale = max(0.25, (h * w) / float(384 * 384))
+
+    static = approx_param_count * bytes_per_param
+    per_sample = (
+        approx_param_count
+        * activation_factor
+        * area_scale
+        * _gc_activation_scale(config)
+    )
+
+    remaining = max(0.0, budget.trainable_bytes - static)
+    if per_sample <= 0:
+        return min_batch
+
+    return _pick_batch(int(remaining // per_sample), min_batch, max_batch)
 
 
 def apply_memory_fraction(

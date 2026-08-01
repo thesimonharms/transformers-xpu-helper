@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "transformers-xpu-helper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Speed up and optimize Hugging Face Transformers training on Intel XPUs, tuned for Core Ultra 7 255H (Arc 140T)."
 readme = "README.md"
 license = "MIT"
